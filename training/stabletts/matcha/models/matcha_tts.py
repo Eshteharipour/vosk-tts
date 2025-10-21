@@ -48,9 +48,12 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         self.out_size = out_size
         self.use_precomputed_durations = use_precomputed_durations
 
-        if n_spks > 1:
-            self.spk_emb = torch.nn.Embedding(n_spks, spk_emb_dim)
-            self.dur_spk_emb = torch.nn.Embedding(n_spks, spk_emb_dim)
+        emb_num = max(n_spks, 1)
+        self.spk_emb = torch.nn.Embedding(emb_num, spk_emb_dim)
+        self.dur_spk_emb = torch.nn.Embedding(emb_num, spk_emb_dim)
+        if n_spks <= 1:
+            torch.nn.init.zeros_(self.spk_emb.weight)
+            torch.nn.init.zeros_(self.dur_spk_emb.weight)
 
         self.encoder = TextEncoder(
             encoder.encoder_type,
@@ -128,12 +131,13 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         # For RTF computation
         t = dt.datetime.now()
 
-        spks_orig = spks
-        x_orig = x
-        if self.n_spks > 1:
-            # Get speaker embedding
-            spks = self.spk_emb(spks.long())
-        dur_spks = self.dur_spk_emb(spks_orig.long())
+        if spks is None:
+            spks_orig = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+        else:
+            spks_orig = spks.to(x.device).long()
+
+        spks = self.spk_emb(spks_orig)
+        dur_spks = self.dur_spk_emb(spks_orig)
 
         # Get encoder_outputs `mu_x` and log-scaled token durations `logw`
         x, x_mel, mu_mel, x_dp, mu_dp, x_mask = self.encoder(x, x_lengths, spks, dur_spks, bert)
@@ -148,7 +152,8 @@ class MatchaTTS(BaseLightningClass):  # 🍵
 
 #        phone_duration_extra[0, 24] = 50
 
-        logw = torch.where(phone_duration_extra == 0, logw, phone_duration_extra)
+        if phone_duration_extra is not None:
+            logw = torch.where(phone_duration_extra == 0, logw, phone_duration_extra)
 
         w_round = torch.round(logw * length_scale).clamp(min=1)
 
@@ -172,7 +177,13 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         mu_y = mu_y.transpose(1, 2)
 
         # Align encoded text with mel-spectrogram and get mu_y segment
-        pau_mel = torch.matmul(attn.squeeze(1).transpose(1, 2), phone_duration_extra.unsqueeze(0).transpose(1,2)).transpose(1, 2)
+        if phone_duration_extra is not None:
+            pau_mel = torch.matmul(
+                attn.squeeze(1).transpose(1, 2),
+                phone_duration_extra.unsqueeze(0).transpose(1, 2),
+            ).transpose(1, 2)
+        else:
+            pau_mel = None
 #        print (pau_mel)
 
         # Align encoded text with mel-spectrogram and get mu_y segment
@@ -192,10 +203,11 @@ class MatchaTTS(BaseLightningClass):  # 🍵
 #           if pau_mel[0, 0, i] > 0:
 #               decoder_outputs[0, :, i] = sil_mel
 
-        sil_mel_expanded = sil_mel.view(1, -1, 1)
-        condition = pau_mel[:, :, :y_max_length] > 0
-        condition = condition.expand(-1, decoder_outputs.size(1), -1)
-        decoder_outputs = torch.where(condition, sil_mel_expanded, decoder_outputs)
+        if pau_mel is not None:
+            sil_mel_expanded = sil_mel.view(1, -1, 1)
+            condition = pau_mel[:, :, :y_max_length] > 0
+            condition = condition.expand(-1, decoder_outputs.size(1), -1)
+            decoder_outputs = torch.where(condition, sil_mel_expanded, decoder_outputs)
 
 
         t = (dt.datetime.now() - t).total_seconds()
@@ -233,7 +245,11 @@ class MatchaTTS(BaseLightningClass):  # 🍵
                 shape: (batch_size,)
         """
 
-        spks_orig = spks
+        if spks is None:
+            spks_orig = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+        else:
+            spks_orig = spks.to(x.device).long()
+
         spks = self.spk_emb(spks_orig)
         dur_spks = self.dur_spk_emb(spks_orig)
         x_orig = x
