@@ -6,14 +6,14 @@ https://github.com/KdaiP/StableTTS
 
 https://github.com/yl4579/StyleTTS2
 
-### Some important changes in last design:
+## Key changes in the latest design
 
-  * We use voicebox-style guidance for flow matching (basically condition with phone embeddings), not mel like in Matcha. This adds more variability to inputs.
-  * We use kaldi-predicted durations instead of monotonic align. The latter doesn't properly model pauses and does many bad things for multispeaker. The label files with durations look like below and created with nnet3-align software. Note that we use non-standard frame shift of 0.011 second (correspondin to hop size 256 at 22050 sample rate.
-  * We use advanced frontend with punctuation embedding and word-position dependent phones
-  * We train prior and duration embeddings separately (flow matching has high gradients and badly affects prior). We yet to implement the code to cleanly separate training steps. https://t.me/speechtech/2153
-  * We add dither noise to mel to deal with zero energy regions common in dirty data.
- 
+- **Voicebox-style guidance for the decoder.** The conditional flow matching module now applies classifier-free guidance over phone-conditioned latents (instead of mel references), which increases diversity at inference time.【F:training/stabletts/matcha/models/components/flow_matching.py†L60-L103】【F:training/stabletts/matcha/models/components/flow_matching.py†L182-L205】
+- **Kaldi phone-level durations replace MAS.** Training relies on `.lab` files produced by `nnet3-align` with a 0.011 s frame shift (hop size 256 @ 22.05 kHz) to model pauses accurately for multi-speaker data.【F:training/stabletts/configs/data/ljspeech.yaml†L10-L16】【F:training/stabletts/matcha/data/text_mel_datamodule.py†L184-L192】【F:training/stabletts/matcha/models/matcha_tts.py†L254-L308】
+- **Advanced Russian text frontend.** The phoneme pipeline keeps punctuation, injects word-position tags and feeds word-level BERT embeddings into the encoder, so the original text (with punctuation) must be preserved in the metadata.【F:training/stabletts/matcha/text/__init__.py†L28-L188】
+- **Separated training phases.** Only the decoder is unfrozen in the default run while prior/duration losses are stubbed out until a dedicated schedule is implemented (see discussion: https://t.me/speechtech/2153).【F:training/stabletts/matcha/models/matcha_tts.py†L82-L85】【F:training/stabletts/matcha/models/matcha_tts.py†L281-L308】
+- **Robust mel computation.** A small amount of dither is injected before every STFT to avoid zero-energy artefacts that otherwise destabilise learning on noisy corpora.【F:training/stabletts/matcha/utils/audio.py†L45-L85】
+
 ### Label file example
 
 ```
@@ -62,10 +62,10 @@ pretrained checkpoints that are published on
 - [Preparing a dataset](#preparing-a-dataset)
   - [1. Collect audio and normalize it](#1-collect-audio-and-normalize-it)
   - [2. Create metadata with transcripts](#2-create-metadata-with-transcripts)
-  - [3. Generate phoneme alignments](#3-generate-phoneme-alignments)
+  - [3. Force-align with Kaldi and export durations](#3-force-align-with-kaldi-and-export-durations)
   - [4. Split the metadata](#4-split-the-metadata)
   - [5. Compute mel statistics (optional but recommended)](#5-compute-mel-statistics-optional-but-recommended)
-  - [6. Generate duration supervision (optional)](#6-generate-duration-supervision-optional)
+  - [6. Enable duration loading in the config](#6-enable-duration-loading-in-the-config)
 - [Training and fine-tuning](#training-and-fine-tuning)
   - [Training from scratch](#training-from-scratch)
   - [Fine-tuning from a checkpoint](#fine-tuning-from-a-checkpoint)
@@ -99,11 +99,9 @@ training or inference:
 
 | Component | Location (relative to `training/stabletts`) | Notes |
 |-----------|---------------------------------------------|-------|
-| Russian dictionary | `checkpoints/dictionary/dictionary` | Weighted pronunciation lexicon used by `matcha.text` during phoneme conversion.【F:training/stabletts/matcha/text/__init__.py†L19-L36】 |
-| Russian BERT | `checkpoints/rubert-base` | Download the
-  [DeepPavlov `rubert-base-cased`](https://huggingface.co/DeepPavlov/rubert-base-cased) model
-  and place the extracted files in this directory. It is loaded directly via
-  `BertModel.from_pretrained` and `BertTokenizer.from_pretrained`.【F:training/stabletts/matcha/text/__init__.py†L38-L63】 |
+| Russian dictionary | `db/dictionary` | Weighted pronunciation lexicon consumed by the frontend when expanding phonemes.【F:training/stabletts/matcha/text/__init__.py†L28-L36】 |
+| Russian BERT | `rubert-base` | Place the HuggingFace [DeepPavlov `rubert-base-cased`](https://huggingface.co/DeepPavlov/rubert-base-cased) files here so they can be loaded via `BertModel.from_pretrained` and `BertTokenizer.from_pretrained`.【F:training/stabletts/matcha/text/__init__.py†L38-L63】 |
+| Kaldi label files | `*.lab` next to each WAV | Phone-level alignments produced by `nnet3-align` (0.011 s frame shift) that the dataloader converts into duration tensors.【F:training/stabletts/matcha/data/text_mel_datamodule.py†L184-L205】 |
 | Vocoder | `checkpoints/vocos` or `checkpoints/hifigan_*` | Optional but recommended for evaluation. The CLI supports [Vocos](https://github.com/gemelo-ai/vocos), HiFi-GAN and BigVGAN.【F:training/stabletts/matcha/cli.py†L47-L104】【F:training/stabletts/matcha/cli.py†L271-L332】 |
 
 The directories can be created manually; the training scripts will not attempt
@@ -155,7 +153,9 @@ ffmpeg -i input.flac -ar 22050 -ac 1 -af loudnorm output.wav
 ### 2. Create metadata with transcripts
 
 Prepare a UTF-8 encoded CSV (pipe-separated) that lists the clean text for every
-clip. The canonical layout for a **multi-speaker** corpus is:
+clip. Keep all punctuation (including quotes and dashes): the frontend augments
+phones with punctuation embeddings and needs the original surface form.【F:training/stabletts/matcha/text/__init__.py†L120-L188】
+The canonical layout for a **multi-speaker** corpus is:
 
 ```
 /path/to/audio.wav|speaker_id|Original text with punctuation|aligned_phoneme_sequence
@@ -172,29 +172,66 @@ placeholder such as `NA` is fine for now. Save the complete file as
 `db/metadata-phones-ids.csv` inside `training/stabletts`. All downstream scripts
 look for that location by default.【F:training/gpt-sovits/prepare_datasets/2-get-hubert-vosk.py†L23-L29】
 
-### 3. Generate phoneme alignments
+### 3. Force-align with Kaldi and export durations
 
-StableTTS conditions the encoder on phoneme tokens and word-level BERT
-embeddings. The phoneme sequence is expected to mirror the forced alignment of
-each utterance:
+The dataloader now expects Kaldi `nnet3-align` outputs placed beside every WAV.
+Each `.lab` file carries three columns: the phone symbol, its start frame and
+its frame-length at a 0.011 s frame shift (hop size 256).【F:training/stabletts/matcha/data/text_mel_datamodule.py†L184-L205】
 
-- Tokens must be separated by spaces, with word-internal phonemes joined by
-  underscores (e.g. `п р_и_в_ь_е_т ,`), which preserves the boundary structure
-  used by `text_to_sequence_aligned`.【F:training/stabletts/matcha/text/__init__.py†L92-L120】
-- Punctuation tokens are kept as-is so that text and alignment remain in sync.
+1. Train or fine-tune an acoustic model in Kaldi that matches your lexicon and
+   sampling rate. Keep the frame shift at 11 ms so the durations line up with
+   the mel hop size.【F:training/stabletts/configs/data/ljspeech.yaml†L10-L16】
+2. Run `nnet3-align` with `--frame-shift=0.011` (or `--online-ivector-dir` if
+   you use speaker adaptation) to produce `ali.*.gz` files.
+3. Convert the alignments into phone-level labels, e.g.
 
-A practical workflow is:
+   ```
+   ali-to-phones --write-lengths=true final.mdl "ark:gunzip -c ali.*.gz|" ark,t:- |
+     utils/int2sym.pl -f 2- data/lang/phones.txt > alignments.txt
+   ```
 
-1. Run a forced aligner (such as [Montreal Forced Aligner](https://montreal-forced-aligner.readthedocs.io/)
-   or [Piper phonemizer](https://github.com/rhasspy/piper-phonemizer)) to obtain
-   word/phoneme timings.
-2. Export the aligned phoneme strings in the format described above.
-3. Fill the `aligned_phoneme_sequence` column of `metadata-phones-ids.csv` with
-   those strings.
+   Adapt the helper pipeline to your tree layout. Each line encodes the phone
+   symbol followed by its duration (in frames); compute cumulative offsets when
+   saving the `.lab` file.
 
-If you already have a previous StableTTS/Matcha model, you can bootstrap the
-alignments by running the duration extractor and converting the resulting JSON
-back to the pipe-separated form.
+```
+python - <<'PY'
+from pathlib import Path
+
+out_dir = Path("db/wavs")  # update if your WAVs live elsewhere
+for raw in Path("alignments.txt").read_text(encoding="utf-8").splitlines():
+    parts = raw.strip().split()
+    if not parts:
+        continue
+    utt = parts[0]
+    phones = parts[1::2]
+    lengths = [int(x) for x in parts[2::2]]
+    start = 0
+    rows = []
+    for phone, length in zip(phones, lengths):
+        rows.append(f"{phone} {start} {length}")
+        start += length
+    (out_dir / f"{utt}.lab").write_text("\n".join(rows) + "\n", encoding="utf-8")
+PY
+```
+
+4. Create the `aligned_phoneme_sequence` column by reading the first field of
+   each `.lab` and joining the symbols with single spaces. Keep the literal
+   space token (`' '`) lines—these mark word boundaries and allow the frontend
+   to attach punctuation and BERT embeddings correctly.【F:training/stabletts/matcha/text/__init__.py†L120-L188】
+
+```
+python - <<'PY'
+from pathlib import Path
+for wav in Path("db/wavs").glob("*.wav"):
+    lab = wav.with_suffix(".lab").read_text(encoding="utf-8").strip().splitlines()
+    phones = " ".join(line.split()[0] for line in lab)
+    print(f"{wav}|<speaker_id>|<original text>|{phones}")
+PY
+```
+
+Replace `<speaker_id>` and `<original text>` with your own metadata when merging
+the output back into `metadata-phones-ids.csv`.
 
 ### 4. Split the metadata
 
@@ -231,24 +268,18 @@ The script instantiates the `TextMelDataModule`, iterates over the training set
 and reports the `mel_mean` and `mel_std` that should be stored under
 `data.data_statistics` in the YAML file.【F:training/stabletts/matcha/utils/generate_data_statistics.py†L20-L67】【F:training/stabletts/matcha/utils/generate_data_statistics.py†L82-L104】
 
-### 6. Generate duration supervision (optional)
+### 6. Enable duration loading in the config
 
-Duration supervision can help very small datasets converge faster. Given a
-trained StableTTS/Matcha checkpoint, run:
+Set `data.load_durations: true` so the datamodule reads the `.lab` files you
+generated in the previous step.【F:training/stabletts/configs/data/ljspeech.yaml†L18-L22】【F:training/stabletts/matcha/data/text_mel_datamodule.py†L164-L205】
+Because `model.use_precomputed_durations` is wired to the same flag, the forward
+pass will rely on the supplied durations instead of running MAS during
+training.【F:training/stabletts/configs/model/matcha.yaml†L15-L17】【F:training/stabletts/matcha/models/matcha_tts.py†L254-L308】
 
-```
-cd training/stabletts
-python -m matcha.utils.get_durations_from_trained_model \
-    --input-config ru.yaml \
-    --checkpoint_path /path/to/model.ckpt \
-    --batch-size 8 \
-    --output-folder db/durations
-```
-
-This script uses the loaded model to predict alignments for every item in the
-file list and writes per-token duration `.npy` files under the chosen output
-folder.【F:training/stabletts/matcha/utils/get_durations_from_trained_model.py†L19-L119】【F:training/stabletts/matcha/utils/get_durations_from_trained_model.py†L137-L200】
-Enable duration loading by setting `data.load_durations: true` in your config.
+If you ever need a neural fallback (e.g. when Kaldi alignments are unavailable),
+`matcha.utils.get_durations_from_trained_model` can still generate `.npy`
+durations; you would then need to adapt `TextMelDataset.get_durations` to load
+those files instead of `.lab`.
 
 ## Training and fine-tuning
 
@@ -341,8 +372,8 @@ for Hydra-based evaluation workflows).【F:training/stabletts/configs/eval.yaml�
   `checkpoints/rubert-base` directory contains `config.json`, `pytorch_model.bin`
   and tokenizer files downloaded from HuggingFace.
 - **`FileNotFoundError` when loading durations.** Either disable durations by
-  setting `data.load_durations: false` or generate them with the helper script.
-  The dataset expects `durations/<utterance_id>.npy` next to the WAVs.【F:training/stabletts/matcha/data/text_mel_datamodule.py†L165-L217】
+  setting `data.load_durations: false` or make sure every WAV has a matching
+  `.lab` file with Kaldi-style phone timings.【F:training/stabletts/matcha/data/text_mel_datamodule.py†L184-L205】
 - **Hydra cannot find a config.** Run all commands from the
   `training/stabletts` directory so that relative paths resolve correctly.
 
