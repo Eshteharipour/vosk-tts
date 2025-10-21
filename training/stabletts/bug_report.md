@@ -1,10 +1,8 @@
 # Known Runtime Issues
 
 - `training/stabletts/checkpoints/vocos/config.yaml`  
-  The bundled config from HuggingFace includes newer Vocos mel-spectrogram arguments (`f_min`, `f_max`, `norm`, `mel_scale`). The version vendored in this repo predates that API, so you get `TypeError: got an unexpected keyword argument`.  
-  **Fix (pick one and delete the other solution once chosen):**  
-  1. Upgrade the `vocos` package to a release that supports those keywords (>=0.1.0).  
-  2. Stay on the current package version and remove the four unsupported keys from `feature_extractor.init_args`.
+  The bundled config from HuggingFace includes newer Vocos mel-spectrogram arguments (`f_min`, `f_max`, `norm`, `mel_scale`). The vanilla package in this repo predates that API, so you hit `TypeError: got an unexpected keyword argument`.  
+  **Fix:** Switch the dependency to the Matcha-aligned fork (`https://github.com/wetdog/vocos/tree/matcha`) or any Vocos release ≥0.1.0 that already contains those parameters; otherwise strip the four keys or the code path will crash.
 
 - `training/stabletts/matcha/cli.py:35-46`  
   The CLI still assumes `text_to_sequence` returns a flat list of IDs. In reality it yields a list of five-element tuples (token, punctuation flags, quote flag, etc.). Passing that through `intersperse(..., 0)` mixes ints with tuples, so `torch.tensor(x)` raises `TypeError: not a sequence`. Even if it succeeded, the tensor shape would be `(1, seq)` instead of the `(batch, features, seq)` layout expected by `TextEncoder`.  
