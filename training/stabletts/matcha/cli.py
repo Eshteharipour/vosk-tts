@@ -3,6 +3,7 @@ import sys
 import argparse
 import datetime as dt
 import os
+import re
 import warnings
 from pathlib import Path
 
@@ -16,8 +17,8 @@ from matcha.hifigan.denoiser import Denoiser
 from matcha.hifigan.env import AttrDict
 from matcha.hifigan.models import Generator as HiFiGAN
 from matcha.models.matcha_tts import MatchaTTS
-from matcha.text import sequence_to_text, text_to_sequence
-from matcha.utils.utils import assert_model_downloaded, get_user_data_dir, intersperse, intersperse_bert
+from matcha.utils.utils import get_user_data_dir
+from matcha import text as matcha_text
 
 
 
@@ -32,18 +33,127 @@ def plot_spectrogram_to_numpy(spectrogram, filename):
     plt.savefig(filename)
 
 
+def _prepare_multistream(text: str):
+    """
+    Replicates the multistream frontend used during training.
+    Returns phoneme tuples, BERT embeddings per phone and optional duration overrides.
+    """
+    bert_embeddings = matcha_text.get_bert_embeddings(text)
+
+    phonemes = [("^", [], 0, 0)]
+
+    pattern = r"(\.\.\.|- |[ ,.?!;:\"()])"
+    processed_text = text.replace("\n", " ")
+    processed_text = processed_text.replace(" -", "- ")
+
+    in_quote = 0
+    cur_punc = []
+    bert_word_index = 1
+
+    for word in re.split(pattern, processed_text.lower()):
+        if word == "":
+            continue
+
+        if word == "\"":
+            in_quote = 0 if in_quote == 1 else 1
+            continue
+
+        if word == "- " or word == "-":
+            cur_punc.append("-")
+            continue
+
+        if re.match(pattern, word) and word != " ":
+            cur_punc.append(word)
+            continue
+
+        if word == " ":
+            phonemes.append((" ", cur_punc, in_quote, bert_word_index))
+            cur_punc = []
+            continue
+
+        if word in matcha_text.wdic:
+            word_phonemes = matcha_text.wdic[word]
+        else:
+            word_phonemes = matcha_text.convert(word).split()
+
+        for p in matcha_text.get_pos(word_phonemes):
+            phonemes.append((p, [], in_quote, bert_word_index))
+
+        cur_punc = []
+        bert_word_index += 1
+
+    phonemes.append((" ", cur_punc, in_quote, bert_word_index))
+    phonemes.append(("$", [], 0, bert_word_index))
+
+    last_punc = " "
+    last_sentence_punc = " "
+
+    lp_phonemes = []
+    phone_bert_embeddings = []
+    phone_duration_extra = []
+
+    for p in reversed(phonemes):
+        if "..." in p[1]:
+            last_sentence_punc = "..."
+        elif "." in p[1]:
+            last_sentence_punc = "."
+        elif "!" in p[1]:
+            last_sentence_punc = "!"
+        elif "?" in p[1]:
+            last_sentence_punc = "?"
+        elif "-" in p[1]:
+            last_sentence_punc = "-"
+
+        phone_duration_ext = 20.0 if "_" in p[1] else 0.0
+
+        if len(p[1]) > 0:
+            last_punc = p[1][0]
+            cur_punc = p[1][0]
+        else:
+            cur_punc = "_"
+
+        lp_phonemes.append(
+            (
+                matcha_text._symbol_to_id[p[0]],
+                matcha_text._symbol_to_id[cur_punc],
+                p[2],
+                matcha_text._symbol_to_id[last_punc],
+                matcha_text._symbol_to_id[last_sentence_punc],
+            )
+        )
+
+        if p[3] >= len(bert_embeddings):
+            raise RuntimeError("BERT alignment mismatch while processing text.")
+        phone_bert_embeddings.append(bert_embeddings[p[3]])
+        phone_duration_extra.append(phone_duration_ext)
+
+    lp_phonemes = list(reversed(lp_phonemes))
+    phone_bert_embeddings = list(reversed(phone_bert_embeddings))
+    phone_duration_extra = list(reversed(phone_duration_extra))
+
+    return lp_phonemes, phone_bert_embeddings, phone_duration_extra
+
+
 def process_text(i: int, text: str, device: torch.device):
     print(f"[{i}] - Input text: {text}")
-    x, bert = text_to_sequence(text, [])
-    x = intersperse(x, 0)
-    bert = intersperse_bert(bert)
-    x = torch.tensor(x, dtype=torch.long, device=device).unsqueeze(0)
-    bert = torch.stack(bert, dim=0).T.unsqueeze(0).to(device)
+    phoneme_tuples, bert_embeddings, phone_duration_extra = _prepare_multistream(text)
+
+    x = torch.tensor(phoneme_tuples, dtype=torch.long, device=device).T.unsqueeze(0)
+    bert = torch.stack(bert_embeddings, dim=0).T.unsqueeze(0).to(device)
+    phone_duration_extra = torch.tensor(phone_duration_extra, dtype=torch.float32, device=device).unsqueeze(0)
+
     x_lengths = torch.tensor([x.shape[-1]], dtype=torch.long, device=device)
-    x_phones = sequence_to_text(x.squeeze(0).tolist())
+    x_phones = matcha_text.sequence_to_text(x[0, 0, :].tolist())
     print(f"[{i}] - Phonetised text: {x_phones}")
 
-    return {"x_orig": text, "x": x, "x_lengths": x_lengths, "x_phones": x_phones, "bert" : bert}
+    return {
+        "x_orig": text,
+        "x": x,
+        "x_lengths": x_lengths,
+        "x_phones": x_phones,
+        "bert": bert,
+        "phone_duration_extra": phone_duration_extra,
+    }
 
 
 def get_texts(args):
@@ -307,22 +417,33 @@ class BatchedSynthesisDataset(torch.utils.data.Dataset):
 
 
 def batched_collate_fn(batch):
-    x = []
-    x_lengths = []
+    batch_size = len(batch)
+    x_lengths = torch.concat([item["x_lengths"] for item in batch], dim=0)
+    max_len = int(x_lengths.max().item())
 
-    for b in batch:
-        x.append(b["x"].squeeze(0))
-        x_lengths.append(b["x_lengths"])
+    x = torch.zeros((batch_size, 5, max_len), dtype=torch.long)
+    bert = torch.zeros((batch_size, 768, max_len), dtype=torch.float32)
+    phone_duration_extra = torch.zeros((batch_size, max_len), dtype=torch.float32)
 
-    x = torch.nn.utils.rnn.pad_sequence(x, batch_first=True)
-    x_lengths = torch.concat(x_lengths, dim=0)
-    return {"x": x, "x_lengths": x_lengths}
+    for idx, item in enumerate(batch):
+        seq_len = int(item["x_lengths"].item())
+        x[idx, :, :seq_len] = item["x"].squeeze(0).cpu()
+        bert[idx, :, :seq_len] = item["bert"].squeeze(0).cpu()
+        phone_duration_extra[idx, :seq_len] = item["phone_duration_extra"].squeeze(0).cpu()
+
+    return {
+        "x": x,
+        "x_lengths": x_lengths,
+        "bert": bert,
+        "phone_duration_extra": phone_duration_extra,
+    }
 
 
 def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
     total_rtf = []
     total_rtf_w = []
-    processed_text = [process_text(i, text, "cpu") for i, text in enumerate(texts)]
+    cpu_device = torch.device("cpu")
+    processed_text = [process_text(i, text, cpu_device) for i, text in enumerate(texts)]
     dataloader = torch.utils.data.DataLoader(
         BatchedSynthesisDataset(processed_text),
         batch_size=args.batch_size,
@@ -340,6 +461,8 @@ def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
             temperature=args.temperature,
             spks=spk.expand(b) if spk is not None else spk,
             length_scale=args.speaking_rate,
+            bert=batch["bert"].to(device),
+            phone_duration_extra=batch["phone_duration_extra"].to(device),
         )
 
 #        output["waveform"] = to_waveform(output["mel"], vocoder, denoiser)
@@ -385,6 +508,7 @@ def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
             spks=spk,
             bert=text_processed["bert"],
             length_scale=args.speaking_rate,
+            phone_duration_extra=text_processed["phone_duration_extra"],
         )
         output["waveform"] = to_waveform(output["mel"], vocoder, denoiser) * 1.5 # Loudness
         # RTF with HiFiGAN
