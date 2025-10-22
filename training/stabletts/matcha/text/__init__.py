@@ -196,22 +196,10 @@ def text_to_sequence(text, cleaners_names):
         lp_phonemes.append((_symbol_to_id[p[0]], _symbol_to_id[cur_punc], p[2], _symbol_to_id[last_punc], _symbol_to_id[last_sentence_punc]))
 #        lp_phonemes.append((_symbol_to_id[p[0]], _symbol_to_id["!"], p[2], _symbol_to_id["!"], _symbol_to_id["!"]))
         if p[3] >= len(bert_embeddings):
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", orig_text, flush=True)
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", flush=True)
+             raise RuntimeError(
+                 "Multistream frontend failed to align BERT embeddings "
+                 f"(index {p[3]} >= {len(bert_embeddings)}) for text: {text!r}"
+             )
         phone_bert_embeddings.append(bert_embeddings[p[3]])
     lp_phonemes = list(reversed(lp_phonemes))
     phone_bert_embeddings = list(reversed(phone_bert_embeddings))
@@ -313,22 +301,10 @@ def text_to_sequence_aligned(orig_text, text):
 
         lp_phonemes.append((_symbol_to_id[p[0]], _symbol_to_id[cur_punc], p[2], _symbol_to_id[last_punc], _symbol_to_id[last_sentence_punc]))
         if p[3] >= len(bert_embeddings):
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", orig_text, flush=True)
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-             print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", flush=True)
+             raise RuntimeError(
+                 "Multistream frontend failed to align BERT embeddings "
+                 f"(index {p[3]} >= {len(bert_embeddings)}) for text: {orig_text!r}"
+             )
         phone_bert_embeddings.append(bert_embeddings[p[3]])
     lp_phonemes = list(reversed(lp_phonemes))
     phone_bert_embeddings = list(reversed(phone_bert_embeddings))

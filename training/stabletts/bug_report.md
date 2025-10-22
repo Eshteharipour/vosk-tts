@@ -12,16 +12,16 @@
   ~~This update switched the phoneme frontend to a five-stream layout and relocated resources (`training/stabletts/matcha/text/__init__.py:28-214`, `training/stabletts/matcha/data/text_mel_datamodule.py:181-260`), but the inference CLI (`training/stabletts/matcha/cli.py:35-46`) and vocoder hook were left in their pre-multistream form. As a result, text preprocessing collapses the tuples back to a single channel and never supplies BERT/`phone_duration_extra`, which explains the degraded audio reported above.~~  
   ✅ Fixed — migration completed; CLI honours the five-channel tensors and duration conditioning (see `training/stabletts/fix_report.md`).
 
-- `training/stabletts/matcha/models/matcha_tts.py:134-198`  
-  `phone_duration_extra` is optional but the synthesiser unconditionally calls `torch.where(phone_duration_extra == 0, ...)` and later builds `pau_mel` from it. When the argument is `None` (the default path taken by the CLI) this crashes with `TypeError` and `AttributeError`.  
-  **Fix:** Gate the whole augmentation block: only compute `torch.where`, `pau_mel`, and the silence replacement when a real tensor is supplied. Leave `logw` untouched otherwise.
+- ~~`training/stabletts/matcha/models/matcha_tts.py:134-198`~~  
+  ~~`phone_duration_extra` is optional but the synthesiser unconditionally calls `torch.where(phone_duration_extra == 0, ...)` and later builds `pau_mel` from it. When the argument is `None` (the default path taken by the CLI) this crashes with `TypeError` and `AttributeError`.~~  
+  ✅ Fixed — `phone_duration_extra` is now fully optional inside `synthesise` (see `training/stabletts/fix_report.md`).
 
-- `training/stabletts/matcha/models/matcha_tts.py:131-137` and `training/stabletts/matcha/models/matcha_tts.py:236-246`  
-  Speaker embeddings are created only when `n_spks > 1`, yet both `synthesise` and `forward` always call `self.spk_emb(spks_orig.long())` and `self.dur_spk_emb(...)`. On single-speaker configs (the default in `configs/data/ljspeech.yaml`) these attributes do not exist and `spks` is `None`, resulting in `AttributeError`/`TypeError`.  
-  **Fix:** Instantiate `self.spk_emb`/`self.dur_spk_emb` for all models, or short-circuit when `n_spks == 1` by substituting zero embeddings and skipping `.long()` on `None`. The dataloader already returns `spks=None` in the single-speaker case; handle that before taking embeddings.
+- ~~`training/stabletts/matcha/models/matcha_tts.py:131-137` and `training/stabletts/matcha/models/matcha_tts.py:236-246`~~  
+  ~~Speaker embeddings are created only when `n_spks > 1`, yet both `synthesise` and `forward` always call `self.spk_emb(spks_orig.long())` and `self.dur_spk_emb(...)`. On single-speaker configs (the default in `configs/data/ljspeech.yaml`) these attributes do not exist and `spks` is `None`, resulting in `AttributeError`/`TypeError`.~~  
+  ✅ Fixed — embeddings now exist for single-speaker runs and `None` speaker ids are handled gracefully (see `training/stabletts/fix_report.md`).
 
-- `training/stabletts/matcha/text/__init__.py:196-214`  
-  The debug branch that fires when BERT alignment lengths mismatch references `orig_text`, which is undefined in this scope. If that branch is triggered you get `NameError: name 'orig_text' is not defined`, obscuring the real issue.  
-  **Fix:** Replace `orig_text` with the available `text` argument (or pass the original string explicitly) and consider raising a descriptive exception instead of printing.
+- ~~`training/stabletts/matcha/text/__init__.py:196-214`~~  
+  ~~The debug branch that fires when BERT alignment lengths mismatch references `orig_text`, which is undefined in this scope. If that branch is triggered you get `NameError: name 'orig_text' is not defined`, obscuring the real issue.~~  
+  ✅ Fixed — raising a descriptive `RuntimeError` now replaces the noisy print fallback (see `training/stabletts/fix_report.md`).
 
 These items should be addressed before attempting further quality experiments; otherwise inference either crashes outright or silently falls back to inconsistent tensor shapes, which amplifies the poor audio quality you observed.
