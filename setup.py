@@ -26,5 +26,14 @@ setuptools.setup(
         'Topic :: Software Development :: Libraries :: Python Modules'
     ],
     python_requires='>=3.7',
-    install_requires=['onnxruntime>=1.14', 'tqdm', 'requests', 'tokenizers'],
+    install_requires=[
+        'tqdm',
+        'requests',
+        'tokenizers'
+    ],
+    extras_require={
+        'onnx-cpu': ['onnxruntime>=1.14'],
+        'onnx-gpu': ['onnxruntime-gpu>=1.14', 'torch'],
+        'cli': ['vocos', 'torch']
+    },
 )
