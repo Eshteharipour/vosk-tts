@@ -581,11 +581,11 @@ def single_synthesis(args, device, model, vocoder, denoiser, text, spk, bert_mod
     }
 
 
-def get_bert():
+def get_bert(path="rubert-base"):
     from transformers import BertModel, BertTokenizer
 
-    model = BertModel.from_pretrained("rubert-base")
-    tokenizer = BertTokenizer.from_pretrained("rubert-base")
+    model = BertModel.from_pretrained(path)
+    tokenizer = BertTokenizer.from_pretrained(path)
 
     return model, tokenizer
 
