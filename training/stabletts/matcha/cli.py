@@ -1,28 +1,23 @@
-import sys
-
 import argparse
 import datetime as dt
+import logging
 import os
 import re
 import warnings
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
-import soundfile as sf
 import torch
-
-from matcha.hifigan.config import v1
-from matcha.hifigan.denoiser import Denoiser
-from matcha.hifigan.env import AttrDict
-from matcha.hifigan.models import Generator as HiFiGAN
-from matcha.models.matcha_tts import MatchaTTS
-from matcha.utils.utils import get_user_data_dir
 from matcha import text as matcha_text
 
+logger = logging.getLogger(__name__)
+
+torch.set_printoptions(profile="full")
+torch.set_printoptions(linewidth=200)
 
 
 def plot_spectrogram_to_numpy(spectrogram, filename):
+    import matplotlib.pyplot as plt
+
     fig, ax = plt.subplots(figsize=(12, 3))
     im = ax.imshow(spectrogram, aspect="auto", origin="lower", interpolation="none")
     plt.colorbar(im, ax=ax)
@@ -33,12 +28,12 @@ def plot_spectrogram_to_numpy(spectrogram, filename):
     plt.savefig(filename)
 
 
-def _prepare_multistream(text: str):
+def _prepare_multistream(text: str, model, tokenizer):
     """
     Replicates the multistream frontend used during training.
     Returns phoneme tuples, BERT embeddings per phone and optional duration overrides.
     """
-    bert_embeddings = matcha_text.get_bert_embeddings(text)
+    bert_embeddings = matcha_text.get_bert_embeddings(text, model, tokenizer)
 
     phonemes = [("^", [], 0, 0)]
 
@@ -54,7 +49,7 @@ def _prepare_multistream(text: str):
         if word == "":
             continue
 
-        if word == "\"":
+        if word == '"':
             in_quote = 0 if in_quote == 1 else 1
             continue
 
@@ -134,9 +129,10 @@ def _prepare_multistream(text: str):
     return lp_phonemes, phone_bert_embeddings, phone_duration_extra
 
 
-def process_text(i: int, text: str, device: torch.device):
-    print(f"[{i}] - Input text: {text}")
-    phoneme_tuples, bert_embeddings, phone_duration_extra = _prepare_multistream(text)
+def process_text(i: int, text: str, device: torch.device, model, tokenizer):
+    """i is for backwards compatibility."""
+    logger.debug(f"[Input text: {text}")
+    phoneme_tuples, bert_embeddings, phone_duration_extra = _prepare_multistream(text, model, tokenizer)
 
     x = torch.tensor(phoneme_tuples, dtype=torch.long, device=device).T.unsqueeze(0)
     bert = torch.stack(bert_embeddings, dim=0).T.unsqueeze(0).to(device)
@@ -144,7 +140,7 @@ def process_text(i: int, text: str, device: torch.device):
 
     x_lengths = torch.tensor([x.shape[-1]], dtype=torch.long, device=device)
     x_phones = matcha_text.sequence_to_text(x[0, 0, :].tolist())
-    print(f"[{i}] - Phonetised text: {x_phones}")
+    logger.debug(f"Phonetised text: {x_phones}")
 
     return {
         "x_orig": text,
@@ -166,6 +162,8 @@ def get_texts(args):
 
 
 def assert_required_models_available(args):
+    from matcha.utils.utils import get_user_data_dir
+
     save_dir = get_user_data_dir()
     if not hasattr(args, "checkpoint_path") and args.checkpoint_path is None:
         model_path = args.checkpoint_path
@@ -177,6 +175,10 @@ def assert_required_models_available(args):
 
 
 def load_hifigan(checkpoint_path, device):
+    from matcha.hifigan.config import v1
+    from matcha.hifigan.env import AttrDict
+    from matcha.hifigan.models import Generator as HiFiGAN
+
     h = AttrDict(v1)
     hifigan = HiFiGAN(h).to(device)
     hifigan.load_state_dict(torch.load(checkpoint_path, map_location=device)["generator"])
@@ -185,24 +187,29 @@ def load_hifigan(checkpoint_path, device):
     return hifigan
 
 
-from vocos import Vocos
+def load_vocos(device, config="checkpoints/vocos/config.yaml", ckpt="checkpoints/vocos/vocos_ru.ckpt"):
+    from vocos import Vocos
 
-def load_vocos(device):
-    vocos = Vocos.from_hparams("checkpoints/vocos/config.yaml")
-    state_dict = torch.load("checkpoints/vocos/vocos_ru.ckpt", map_location="cpu")
-    vocos.load_state_dict(state_dict['state_dict'], strict=False)
+    vocos = Vocos.from_hparams(config)
+    state_dict = torch.load(ckpt, map_location=device)
+    vocos.load_state_dict(state_dict["state_dict"], strict=False)
     vocos.eval()
     vocos = vocos.to(device)
     return vocos
 
+
 def load_bigvgan(device):
     import bigvgan
-    model = bigvgan.BigVGAN.from_pretrained('nvidia/bigvgan_v2_22khz_80band_fmax8k_256x', use_cuda_kernel=False)
+
+    model = bigvgan.BigVGAN.from_pretrained("nvidia/bigvgan_v2_22khz_80band_fmax8k_256x", use_cuda_kernel=False)
     model.remove_weight_norm()
     model = model.eval().to(device)
     return model
 
+
 def load_vocoder(vocoder_name, checkpoint_path, device):
+    from matcha.hifigan.denoiser import Denoiser
+
     print(f"[!] Loading {vocoder_name}!")
     vocoder = None
     if vocoder_name in ("hifigan_T2_v1", "hifigan_univ_v1"):
@@ -225,29 +232,32 @@ def load_vocoder(vocoder_name, checkpoint_path, device):
 
 
 def load_matcha(model_name, checkpoint_path, device):
+    from matcha.models.matcha_tts import MatchaTTS
+
     print(f"[!] Loading {model_name}!")
     model = MatchaTTS.load_from_checkpoint(checkpoint_path, map_location=device)
-    _ = model.eval()
+    model.eval()
+    model.to(device)
 
     print(f"[+] {model_name} loaded!")
     return model
 
-torch.set_printoptions(profile="full")
-torch.set_printoptions(linewidth=200)
 
 def to_waveform(mel, vocoder, denoiser=None):
 
-#    audio = vocoder(mel).clamp(-1, 1)
+    #    audio = vocoder(mel).clamp(-1, 1)
     audio = vocoder.decode(mel).clamp(-1, 1)
 
     return audio.cpu().squeeze()
 
 
 def save_to_folder(filename: str, output: dict, folder: str):
+    import soundfile as sf
+
     folder = Path(folder)
     folder.mkdir(exist_ok=True, parents=True)
-#    plot_spectrogram_to_numpy(np.array(output["mel"].squeeze().float().cpu()), f"{filename}.png")
-#    np.save(folder / f"{filename}", output["mel"].cpu().numpy())
+    #    plot_spectrogram_to_numpy(np.array(output["mel"].squeeze().float().cpu()), f"{filename}.png")
+    #    np.save(folder / f"{filename}", output["mel"].cpu().numpy())
     sf.write(folder / f"{filename}.wav", output["waveform"], 22050, "PCM_16")
     return folder.resolve() / f"{filename}.wav"
 
@@ -392,17 +402,19 @@ def cli():
         paths["matcha"] = args.checkpoint_path
         args.model = "custom_model"
 
+    bert_model, tokenizer = get_bert()
+
     model = load_matcha(args.model, paths["matcha"], device)
     vocoder, denoiser = load_vocoder(args.vocoder, paths["vocoder"], device)
 
     texts = get_texts(args)
 
     spk = torch.tensor([args.spk], device=device, dtype=torch.long) if args.spk is not None else None
-#    if len(texts) == 1 or not args.batched:
-#        unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
-#    else:
-#        batched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
-    unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
+    #    if len(texts) == 1 or not args.batched:
+    #        unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
+    #    else:
+    #        batched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
+    unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer)
 
 
 class BatchedSynthesisDataset(torch.utils.data.Dataset):
@@ -439,11 +451,13 @@ def batched_collate_fn(batch):
     }
 
 
-def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
+def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer):
+    import numpy as np
+
     total_rtf = []
     total_rtf_w = []
     cpu_device = torch.device("cpu")
-    processed_text = [process_text(i, text, cpu_device) for i, text in enumerate(texts)]
+    processed_text = [process_text(i, text, cpu_device, bert_model, tokenizer) for i, text in enumerate(texts)]
     dataloader = torch.utils.data.DataLoader(
         BatchedSynthesisDataset(processed_text),
         batch_size=args.batch_size,
@@ -465,7 +479,7 @@ def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
             phone_duration_extra=batch["phone_duration_extra"].to(device),
         )
 
-#        output["waveform"] = to_waveform(output["mel"], vocoder, denoiser)
+        #        output["waveform"] = to_waveform(output["mel"], vocoder, denoiser)
         output["waveform"] = to_waveform(output["mel_enc"], vocoder, denoiser)
         t = (dt.datetime.now() - start_t).total_seconds()
         rtf_w = t * 22050 / (output["waveform"].shape[-1])
@@ -486,17 +500,21 @@ def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
     print("[🍵] Enjoy the freshly whisked 🍵 Matcha-TTS!")
 
 
-def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
+def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer):
+    import numpy as np
+
     total_rtf = []
     total_rtf_w = []
     for i, text in enumerate(texts):
         i = i + 1
         base_name = f"utterance_{i:03d}_speaker_{args.spk:03d}" if args.spk is not None else f"utterance_{i:03d}"
-        prior_base_name = f"utterance_{i:03d}_speaker_prior_{args.spk:03d}" if args.spk is not None else f"utterance_{i:03d}"
+        prior_base_name = (
+            f"utterance_{i:03d}_speaker_prior_{args.spk:03d}" if args.spk is not None else f"utterance_{i:03d}"
+        )
 
         print("".join(["="] * 100))
         text = text.strip()
-        text_processed = process_text(i, text, device)
+        text_processed = process_text(i, text, device, bert_model, tokenizer)
 
         print(f"[🍵] Whisking Matcha-T(ea)TS for: {i}")
         start_t = dt.datetime.now()
@@ -510,7 +528,7 @@ def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
             length_scale=args.speaking_rate,
             phone_duration_extra=text_processed["phone_duration_extra"],
         )
-        output["waveform"] = to_waveform(output["mel"], vocoder, denoiser) * 1.5 # Loudness
+        output["waveform"] = to_waveform(output["mel"], vocoder, denoiser) * 1.5  # Loudness
         # RTF with HiFiGAN
         t = (dt.datetime.now() - start_t).total_seconds()
         rtf_w = t * 22050 / (output["waveform"].shape[-1])
@@ -521,16 +539,55 @@ def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk):
 
         location = save_to_folder(base_name, output, args.output_folder)
 
-#        output["waveform"] = to_waveform(output["mel_enc"], vocoder, denoiser)
-#        location = save_to_folder(prior_base_name, output, args.output_folder)
+        #        output["waveform"] = to_waveform(output["mel_enc"], vocoder, denoiser)
+        #        location = save_to_folder(prior_base_name, output, args.output_folder)
 
         print(f"[+] Waveform saved: {location}")
-
 
     print("".join(["="] * 100))
     print(f"[🍵] Average Matcha-TTS RTF: {np.mean(total_rtf):.4f} ± {np.std(total_rtf)}")
     print(f"[🍵] Average Matcha-TTS + VOCODER RTF: {np.mean(total_rtf_w):.4f} ± {np.std(total_rtf_w)}")
     print("[🍵] Enjoy the freshly whisked 🍵 Matcha-TTS!")
+
+
+def single_synthesis(args, device, model, vocoder, denoiser, text, spk, bert_model, tokenizer):
+    text = text.strip()
+    text_processed = process_text(0, text, device, bert_model, tokenizer)
+
+    # start_t = dt.datetime.now()
+    output = model.synthesise(
+        text_processed["x"],
+        text_processed["x_lengths"],
+        n_timesteps=args.steps,
+        temperature=args.temperature,
+        spks=spk,
+        bert=text_processed["bert"],
+        length_scale=args.speaking_rate,
+        phone_duration_extra=text_processed["phone_duration_extra"],
+    )
+    output["waveform"] = to_waveform(output["mel"], vocoder, denoiser) * 1.5  # Loudness
+    # RTF with HiFiGAN
+    # t = (dt.datetime.now() - start_t).total_seconds()
+    # rtf_w = t * 22050 / (output["waveform"].shape[-1])
+    logger.debug(f"[🍵] Matcha-TTS RTF: {output['rtf']:.4f}")
+    # logger.debug(f"[🍵] Matcha-TTS + VOCODER RTF: {rtf_w:.4f}")
+
+    return {
+        "waveform": output["waveform"],
+        "sr": 22050,
+        "subtype": "PCM_16",
+        "matcha-rtf": output["rtf"],
+        # "full-rtf": rtf_w,
+    }
+
+
+def get_bert():
+    from transformers import BertModel, BertTokenizer
+
+    model = BertModel.from_pretrained("rubert-base")
+    tokenizer = BertTokenizer.from_pretrained("rubert-base")
+
+    return model, tokenizer
 
 
 def print_config(args):
@@ -554,4 +611,5 @@ def get_device(args):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     cli()

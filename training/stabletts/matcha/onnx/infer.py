@@ -8,8 +8,7 @@ import numpy as np
 import onnxruntime as ort
 import soundfile as sf
 import torch
-
-from matcha.cli import plot_spectrogram_to_numpy, process_text
+from matcha.cli import get_bert, plot_spectrogram_to_numpy, process_text
 
 
 def validate_args(args):
@@ -118,6 +117,9 @@ def main():
     args = parser.parse_args()
     args = validate_args(args)
 
+    # TODO: Load this from onnx
+    bert_model, tokenizer = get_bert()
+
     if args.gpu:
         providers = ["GPUExecutionProvider"]
     else:
@@ -133,7 +135,7 @@ def main():
         with open(args.file, encoding="utf-8") as file:
             text_lines = file.read().splitlines()
 
-    processed_lines = [process_text(0, line, "cpu") for line in text_lines]
+    processed_lines = [process_text(0, line, "cpu", bert_model, tokenizer) for line in text_lines]
     x = [line["x"].squeeze() for line in processed_lines]
     # Pad
     x = torch.nn.utils.rnn.pad_sequence(x, batch_first=True)

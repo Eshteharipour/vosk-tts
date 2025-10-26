@@ -6,12 +6,12 @@ import numpy as np
 import torch
 import torchaudio as ta
 from lightning import LightningDataModule
-from torch.utils.data.dataloader import DataLoader
-
-from matcha.text import text_to_sequence, text_to_sequence_aligned
 from matcha.utils.audio import mel_spectrogram
 from matcha.utils.model import fix_len_compatibility, normalize
 from matcha.utils.utils import intersperse, intersperse_bert
+from torch.utils.data.dataloader import DataLoader
+
+from .from_cli import text_to_sequence_aligned
 
 
 def parse_filelist(filelist_path, split_char="|"):
@@ -178,7 +178,15 @@ class TextMelDataset(torch.utils.data.Dataset):
 
         durations = self.get_durations(filepath, text) if self.load_durations else None
 
-        return {"x": text, "y": mel, "spk": spk, "filepath": filepath, "x_text": cleaned_text, "durations": durations, "bert": bert}
+        return {
+            "x": text,
+            "y": mel,
+            "spk": spk,
+            "filepath": filepath,
+            "x_text": cleaned_text,
+            "durations": durations,
+            "bert": bert,
+        }
 
     def get_durations(self, filepath, text):
         durations = []
@@ -187,7 +195,7 @@ class TextMelDataset(torch.utils.data.Dataset):
             durations.append(int(items[-1]))
         durs = torch.IntTensor(durations)
 
-#        assert len(durs) == len(text), f"Length of durations {len(durs)} and text {len(text)} do not match"
+        #        assert len(durs) == len(text), f"Length of durations {len(durs)} and text {len(text)} do not match"
 
         return durs
 
@@ -209,13 +217,13 @@ class TextMelDataset(torch.utils.data.Dataset):
         return mel
 
     def get_text(self, text, aligned, add_blank=True):
-#        text_norm, cleaned_text = text_to_sequence(text, self.cleaners)
+        #        text_norm, cleaned_text = text_to_sequence(text, self.cleaners)
         text_norm, bert = text_to_sequence_aligned(text, aligned)
-#        if self.add_blank:
-#            text_norm = intersperse(text_norm, 0)
+        #        if self.add_blank:
+        #            text_norm = intersperse(text_norm, 0)
         text_norm = torch.IntTensor(text_norm).T
-#        if self.add_blank:
-#            bert = intersperse_bert(bert)
+        #        if self.add_blank:
+        #            bert = intersperse_bert(bert)
         bert = torch.stack(bert, dim=0).T
 
         return text_norm, bert, text
