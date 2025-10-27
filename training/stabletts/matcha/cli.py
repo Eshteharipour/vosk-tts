@@ -408,7 +408,7 @@ def cli():
     vocoder, denoiser = load_vocoder(args.vocoder, paths["vocoder"], device)
 
     texts = get_texts(args)
-    wdic, _ = matcha_text.get_dictionary()
+    wdic, _ = get_dictionary()
 
     spk = torch.tensor([args.spk], device=device, dtype=torch.long) if args.spk is not None else None
     #    if len(texts) == 1 or not args.batched:
@@ -589,6 +589,18 @@ def get_bert(path="rubert-base"):
     tokenizer = BertTokenizer.from_pretrained(path)
 
     return model, tokenizer
+
+
+def get_dictionary(path="db/dictionary"):
+    wdic = {}
+    probs = {}
+    for line in open(path, encoding="utf-8"):
+        items = line.split()
+        prob = float(items[1])
+        if probs.get(items[0], 0) < prob:
+            wdic[items[0]] = items[2:]
+            probs[items[0]] = prob
+    return wdic, probs
 
 
 def print_config(args):

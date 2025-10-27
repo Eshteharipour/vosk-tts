@@ -8,8 +8,7 @@ import numpy as np
 import onnxruntime as ort
 import soundfile as sf
 import torch
-from matcha.cli import get_bert, plot_spectrogram_to_numpy, process_text
-from matcha.text import get_dictionary
+from matcha.cli import get_bert, get_dictionary, plot_spectrogram_to_numpy, process_text
 
 
 def validate_args(args):
