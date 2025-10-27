@@ -207,7 +207,7 @@ def load_bigvgan(device):
     return model
 
 
-def load_vocoder(vocoder_name, checkpoint_path, device):
+def load_vocoder(vocoder_name, checkpoint_path, device, config=None):
     from matcha.hifigan.denoiser import Denoiser
 
     print(f"[!] Loading {vocoder_name}!")
@@ -215,7 +215,7 @@ def load_vocoder(vocoder_name, checkpoint_path, device):
     if vocoder_name in ("hifigan_T2_v1", "hifigan_univ_v1"):
         vocoder = load_hifigan(checkpoint_path, device)
     elif vocoder_name in ("vocos"):
-        vocoder = load_vocos(device)
+        vocoder = load_vocos(device, config, checkpoint_path)
     elif vocoder_name in ("bigvgan"):
         vocoder = load_bigvgan(device)
     else:
