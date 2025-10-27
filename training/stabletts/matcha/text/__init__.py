@@ -4,11 +4,24 @@ import re
 
 import torch
 
+from .ru_dictionary import convert
 from .symbols import symbols
 
 # Mappings from symbol to numeric ID and vice versa:
-# _symbol_to_id = {s: i for i, s in enumerate(symbols)}
+_symbol_to_id = {s: i for i, s in enumerate(symbols)}
 _id_to_symbol = {i: s for i, s in enumerate(symbols)}  # pylint: disable=unnecessary-comprehension
+
+
+def get_dictionary(path="db/dictionary"):
+    wdic = {}
+    probs = {}
+    for line in open(path, encoding="utf-8"):
+        items = line.split()
+        prob = float(items[1])
+        if probs.get(items[0], 0) < prob:
+            wdic[items[0]] = items[2:]
+            probs[items[0]] = prob
+    return wdic, probs
 
 
 def get_bert_embeddings(text, model, tokenizer):

@@ -28,7 +28,7 @@ def plot_spectrogram_to_numpy(spectrogram, filename):
     plt.savefig(filename)
 
 
-def _prepare_multistream(text: str, model, tokenizer):
+def _prepare_multistream(text: str, model, tokenizer, wdic):
     """
     Replicates the multistream frontend used during training.
     Returns phoneme tuples, BERT embeddings per phone and optional duration overrides.
@@ -66,8 +66,8 @@ def _prepare_multistream(text: str, model, tokenizer):
             cur_punc = []
             continue
 
-        if word in matcha_text.wdic:
-            word_phonemes = matcha_text.wdic[word]
+        if word in wdic:
+            word_phonemes = wdic[word]
         else:
             word_phonemes = matcha_text.convert(word).split()
 
@@ -129,10 +129,10 @@ def _prepare_multistream(text: str, model, tokenizer):
     return lp_phonemes, phone_bert_embeddings, phone_duration_extra
 
 
-def process_text(i: int, text: str, device: torch.device, model, tokenizer):
+def process_text(i: int, text: str, device: torch.device, model, tokenizer, wdic):
     """i is for backwards compatibility."""
     logger.debug(f"[Input text: {text}")
-    phoneme_tuples, bert_embeddings, phone_duration_extra = _prepare_multistream(text, model, tokenizer)
+    phoneme_tuples, bert_embeddings, phone_duration_extra = _prepare_multistream(text, model, tokenizer, wdic)
 
     x = torch.tensor(phoneme_tuples, dtype=torch.long, device=device).T.unsqueeze(0)
     bert = torch.stack(bert_embeddings, dim=0).T.unsqueeze(0).to(device)
@@ -408,13 +408,14 @@ def cli():
     vocoder, denoiser = load_vocoder(args.vocoder, paths["vocoder"], device)
 
     texts = get_texts(args)
+    wdic, _ = matcha_text.get_dictionary()
 
     spk = torch.tensor([args.spk], device=device, dtype=torch.long) if args.spk is not None else None
     #    if len(texts) == 1 or not args.batched:
     #        unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
     #    else:
     #        batched_synthesis(args, device, model, vocoder, denoiser, texts, spk)
-    unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer)
+    unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer, wdic)
 
 
 class BatchedSynthesisDataset(torch.utils.data.Dataset):
@@ -451,13 +452,13 @@ def batched_collate_fn(batch):
     }
 
 
-def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer):
+def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer, wdic):
     import numpy as np
 
     total_rtf = []
     total_rtf_w = []
     cpu_device = torch.device("cpu")
-    processed_text = [process_text(i, text, cpu_device, bert_model, tokenizer) for i, text in enumerate(texts)]
+    processed_text = [process_text(i, text, cpu_device, bert_model, tokenizer, wdic) for i, text in enumerate(texts)]
     dataloader = torch.utils.data.DataLoader(
         BatchedSynthesisDataset(processed_text),
         batch_size=args.batch_size,
@@ -500,7 +501,7 @@ def batched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_m
     print("[🍵] Enjoy the freshly whisked 🍵 Matcha-TTS!")
 
 
-def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer):
+def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert_model, tokenizer, wdic):
     import numpy as np
 
     total_rtf = []
@@ -514,7 +515,7 @@ def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert
 
         print("".join(["="] * 100))
         text = text.strip()
-        text_processed = process_text(i, text, device, bert_model, tokenizer)
+        text_processed = process_text(i, text, device, bert_model, tokenizer, wdic)
 
         print(f"[🍵] Whisking Matcha-T(ea)TS for: {i}")
         start_t = dt.datetime.now()
@@ -550,9 +551,9 @@ def unbatched_synthesis(args, device, model, vocoder, denoiser, texts, spk, bert
     print("[🍵] Enjoy the freshly whisked 🍵 Matcha-TTS!")
 
 
-def single_synthesis(args, device, model, vocoder, denoiser, text, spk, bert_model, tokenizer):
+def single_synthesis(args, device, model, vocoder, denoiser, text, spk, bert_model, tokenizer, wdic):
     text = text.strip()
-    text_processed = process_text(0, text, device, bert_model, tokenizer)
+    text_processed = process_text(0, text, device, bert_model, tokenizer, wdic)
 
     # start_t = dt.datetime.now()
     output = model.synthesise(
