@@ -9,7 +9,6 @@ from matcha.utils.pylogger import get_pylogger
 log = get_pylogger(__name__)
 
 import functools
-from torchdiffeq import odeint
 
 class BASECFM(torch.nn.Module, ABC):
     def __init__(
