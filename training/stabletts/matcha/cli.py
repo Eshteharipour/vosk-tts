@@ -9,6 +9,8 @@ from pathlib import Path
 import torch
 from matcha import text as matcha_text
 
+from .prep import clean_text_for_phonemizer
+
 logger = logging.getLogger(__name__)
 
 torch.set_printoptions(profile="full")
@@ -131,7 +133,10 @@ def _prepare_multistream(text: str, model, tokenizer, wdic):
 
 def process_text(i: int, text: str, device: torch.device, model, tokenizer, wdic):
     """i is for backwards compatibility."""
-    logger.debug(f"[Input text: {text}")
+    logger.debug(f"Input text: {text}")
+    text = clean_text_for_phonemizer(text)
+    logger.debug(f"Prepd text: {text}")
+
     phoneme_tuples, bert_embeddings, phone_duration_extra = _prepare_multistream(text, model, tokenizer, wdic)
 
     x = torch.tensor(phoneme_tuples, dtype=torch.long, device=device).T.unsqueeze(0)
