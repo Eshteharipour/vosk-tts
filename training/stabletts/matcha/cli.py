@@ -20,7 +20,7 @@ from matcha.models.matcha_tts import MatchaTTS
 from matcha.utils.utils import get_user_data_dir
 from matcha import text as matcha_text
 
-
+from .prep import clean_text_for_phonemizer
 
 def plot_spectrogram_to_numpy(spectrogram, filename):
     fig, ax = plt.subplots(figsize=(12, 3))
@@ -136,6 +136,7 @@ def _prepare_multistream(text: str):
 
 def process_text(i: int, text: str, device: torch.device):
     print(f"[{i}] - Input text: {text}")
+    text = clean_text_for_phonemizer(text)
     phoneme_tuples, bert_embeddings, phone_duration_extra = _prepare_multistream(text)
 
     x = torch.tensor(phoneme_tuples, dtype=torch.long, device=device).T.unsqueeze(0)
